@@ -29,11 +29,20 @@ PAGE = """<!doctype html>
            border: 1px solid #ccd1d9; border-radius: 6px; }
     form input[type=number] { width: 110px; padding: 10px 12px; font-size: 15px;
            border: 1px solid #ccd1d9; border-radius: 6px; }
+    form select { padding: 10px 12px; font-size: 15px; border: 1px solid #ccd1d9;
+           border-radius: 6px; background: #fff; }
     form button { padding: 10px 18px; font-size: 15px; background: #1f6feb; color: #fff;
            border: 0; border-radius: 6px; cursor: pointer; }
     form button:disabled { background: #9aaed4; cursor: wait; }
+    #filters { display: none; gap: 8px; flex-wrap: wrap; align-items: center;
+               margin-bottom: 12px; font-size: 14px; color: #555; }
+    #filters.visible { display: flex; }
     #status { margin: 8px 0 16px; font-size: 14px; color: #555; min-height: 20px; }
     #status.error { color: #c0392b; }
+    .dish { font-size: 12px; color: #2a7a3a; margin-top: 2px; }
+    .links { font-size: 12px; margin-top: 4px; }
+    .links a { color: #1f6feb; text-decoration: none; margin-right: 12px; }
+    .links a:hover { text-decoration: underline; }
     .layout { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
     @media (max-width: 800px) { .layout { grid-template-columns: 1fr; } }
     #map { height: 540px; border-radius: 8px; border: 1px solid #ddd; }
@@ -60,6 +69,11 @@ PAGE = """<!doctype html>
       <input type="number" id="radius" name="radius" value="5" min="0.1" max="25" step="0.1" title="Radius (miles)">
       <button type="submit" id="submitBtn">Search</button>
     </form>
+    <div id="filters">
+      <label for="cuisineFilter">Filter by cuisine:</label>
+      <select id="cuisineFilter"><option value="">All</option></select>
+      <span id="filterCount"></span>
+    </div>
     <div id="status"></div>
     <div class="layout">
       <div id="map"></div>
@@ -80,11 +94,48 @@ PAGE = """<!doctype html>
     let centerMarker = null;
     let radiusCircle = null;
     let markersByIndex = {};
+    let lastResults = [];
+    let lastCity = '';
 
     const form = document.getElementById('searchForm');
     const submitBtn = document.getElementById('submitBtn');
     const statusEl = document.getElementById('status');
     const resultsEl = document.getElementById('results');
+    const filtersEl = document.getElementById('filters');
+    const cuisineFilterEl = document.getElementById('cuisineFilter');
+    const filterCountEl = document.getElementById('filterCount');
+
+    // Common dishes by cuisine — best-effort generic hints, not per-restaurant data.
+    const DISHES = {
+      italian: 'Pasta, pizza, risotto', pizza: 'Pizza, calzone',
+      mexican: 'Tacos, burritos, enchiladas', chinese: 'Fried rice, dumplings, kung pao',
+      japanese: 'Sushi, ramen, tempura', sushi: 'Sushi, sashimi, maki',
+      ramen: 'Ramen, gyoza', indian: 'Curry, biryani, naan',
+      thai: 'Pad thai, green curry, tom yum', vietnamese: 'Pho, banh mi, spring rolls',
+      korean: 'Bibimbap, bulgogi, kimchi', american: 'Burgers, BBQ, sandwiches',
+      burger: 'Burgers, fries, milkshakes', bbq: 'Ribs, brisket, pulled pork',
+      barbecue: 'Ribs, brisket, pulled pork', steak_house: 'Steak, prime rib',
+      seafood: 'Fish, lobster, oysters', french: 'Croissant, steak frites, ratatouille',
+      greek: 'Gyros, souvlaki, moussaka', mediterranean: 'Hummus, falafel, kebab',
+      lebanese: 'Hummus, falafel, shawarma', middle_eastern: 'Hummus, falafel, kebab',
+      turkish: 'Kebab, baklava, pide', spanish: 'Paella, tapas, jamón',
+      ethiopian: 'Injera, doro wat, kitfo', cafe: 'Coffee, sandwiches, pastries',
+      coffee_shop: 'Coffee, pastries', bakery: 'Bread, pastries, cakes',
+      ice_cream: 'Ice cream, sundaes', breakfast: 'Pancakes, eggs, bacon',
+      sandwich: 'Sandwiches, subs', vegetarian: 'Salads, vegetable curries',
+      vegan: 'Plant-based bowls, tofu', chicken: 'Fried chicken, wings',
+      noodle: 'Noodles, broth bowls', asian: 'Stir-fry, noodles, rice bowls',
+      pakistani: 'Biryani, kebabs, karahi', filipino: 'Adobo, lumpia, pancit',
+      caribbean: 'Jerk chicken, rice & peas', donut: 'Donuts, coffee',
+      dessert: 'Cakes, pastries, ice cream', tex-mex: 'Fajitas, nachos, quesadillas',
+    };
+
+    function dishesFor(cuisineTag) {
+      if (!cuisineTag) return '';
+      const parts = cuisineTag.toLowerCase().split(/[;,]/).map(s => s.trim());
+      for (const p of parts) if (DISHES[p]) return DISHES[p];
+      return '';
+    }
 
     function setStatus(msg, isError = false) {
       statusEl.textContent = msg;
@@ -133,39 +184,17 @@ PAGE = """<!doctype html>
         }).addTo(map);
         map.fitBounds(radiusCircle.getBounds());
 
+        lastResults = restaurants;
+        lastCity = (center.display.split(',')[1] || '').trim();
+        populateCuisineFilter(restaurants);
+
         if (!restaurants.length) {
           resultsEl.innerHTML = '<div class="empty">No restaurants found in this area.</div>';
+          filtersEl.classList.remove('visible');
           return;
         }
-
-        const html = restaurants.map((r, i) => `
-          <div class="item" data-idx="${i}">
-            <span class="dist">${r.distance_miles.toFixed(2)} mi</span>
-            <h3>${escapeHtml(r.name)}</h3>
-            <div class="meta">
-              ${escapeHtml(r.category)}${r.cuisine ? ' · ' + escapeHtml(r.cuisine) : ''}
-            </div>
-            ${r.address ? `<div class="meta">${escapeHtml(r.address)}</div>` : ''}
-          </div>
-        `).join('');
-        resultsEl.innerHTML = html;
-
-        restaurants.forEach((r, i) => {
-          const m = L.marker([r.lat, r.lon]).addTo(markersLayer)
-            .bindPopup(`<b>${escapeHtml(r.name)}</b><br>${r.distance_miles.toFixed(2)} mi away`
-                       + (r.address ? '<br>' + escapeHtml(r.address) : ''));
-          m.on('click', () => highlight(i));
-          markersByIndex[i] = m;
-        });
-
-        document.querySelectorAll('.item').forEach(el => {
-          el.addEventListener('click', () => {
-            const idx = parseInt(el.dataset.idx, 10);
-            highlight(idx);
-            const r = restaurants[idx];
-            map.setView([r.lat, r.lon], 16);
-          });
-        });
+        filtersEl.classList.add('visible');
+        renderResults();
       } catch (err) {
         setStatus('Error: ' + err.message, true);
         resultsEl.innerHTML = '<div class="empty">Search failed.</div>';
@@ -173,6 +202,74 @@ PAGE = """<!doctype html>
         submitBtn.disabled = false;
       }
     });
+
+    function populateCuisineFilter(restaurants) {
+      const counts = new Map();
+      for (const r of restaurants) {
+        if (!r.cuisine) continue;
+        for (const c of r.cuisine.split(/[;,]/).map(s => s.trim()).filter(Boolean)) {
+          counts.set(c, (counts.get(c) || 0) + 1);
+        }
+      }
+      const sorted = [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+      cuisineFilterEl.innerHTML = `<option value="">All (${restaurants.length})</option>`
+        + sorted.map(([c, n]) => `<option value="${escapeHtml(c)}">${escapeHtml(c)} (${n})</option>`).join('');
+    }
+
+    function renderResults() {
+      const filter = cuisineFilterEl.value;
+      const filtered = filter
+        ? lastResults.filter(r => (r.cuisine || '').toLowerCase().split(/[;,]/).map(s => s.trim()).includes(filter.toLowerCase()))
+        : lastResults;
+
+      filterCountEl.textContent = filter ? `(${filtered.length} of ${lastResults.length})` : '';
+
+      markersLayer.clearLayers();
+      markersByIndex = {};
+
+      if (!filtered.length) {
+        resultsEl.innerHTML = '<div class="empty">No matches for this cuisine.</div>';
+        return;
+      }
+
+      resultsEl.innerHTML = filtered.map((r, i) => {
+        const dishes = dishesFor(r.cuisine);
+        const q = encodeURIComponent(`${r.name} ${lastCity} popular dishes`.trim());
+        return `
+          <div class="item" data-idx="${i}">
+            <span class="dist">${r.distance_miles.toFixed(2)} mi</span>
+            <h3>${escapeHtml(r.name)}</h3>
+            <div class="meta">${escapeHtml(r.category)}${r.cuisine ? ' · ' + escapeHtml(r.cuisine) : ''}</div>
+            ${r.address ? `<div class="meta">${escapeHtml(r.address)}</div>` : ''}
+            ${dishes ? `<div class="dish">Typical dishes: ${escapeHtml(dishes)}</div>` : ''}
+            <div class="links">
+              <a href="https://www.google.com/search?q=${q}" target="_blank" rel="noopener">Popular dishes ↗</a>
+              <a href="https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(r.name + ' ' + (r.address || ''))}" target="_blank" rel="noopener">Open in Maps ↗</a>
+            </div>
+          </div>
+        `;
+      }).join('');
+
+      filtered.forEach((r, i) => {
+        const m = L.marker([r.lat, r.lon]).addTo(markersLayer)
+          .bindPopup(`<b>${escapeHtml(r.name)}</b><br>${r.distance_miles.toFixed(2)} mi away`
+                     + (r.address ? '<br>' + escapeHtml(r.address) : ''));
+        m.on('click', () => highlight(i));
+        markersByIndex[i] = m;
+      });
+
+      document.querySelectorAll('.item').forEach(el => {
+        el.addEventListener('click', (e) => {
+          if (e.target.tagName === 'A') return;
+          const idx = parseInt(el.dataset.idx, 10);
+          highlight(idx);
+          const r = filtered[idx];
+          map.setView([r.lat, r.lon], 16);
+        });
+      });
+    }
+
+    cuisineFilterEl.addEventListener('change', renderResults);
 
     function escapeHtml(s) {
       return String(s).replace(/[&<>"']/g, c => ({
